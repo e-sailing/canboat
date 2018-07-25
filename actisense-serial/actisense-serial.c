@@ -37,6 +37,7 @@ along with CANboat.  If not, see <http://www.gnu.org/licenses/>.
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <inttypes.h>
 
 #include "actisense.h"
 
@@ -44,12 +45,14 @@ along with CANboat.  If not, see <http://www.gnu.org/licenses/>.
 
 /* The following startup command reverse engineered from Actisense NMEAreader.
  * It instructs the NGT1 to clear its PGN message TX list, thus it starts
- * sending all PGNs.
+ * sending filtered PGNs (11)
+ * It instructs the NGT1 to clear its PGN message TX list, thus it starts
+ * sending all PGNs (11 02 00).
  */
 static unsigned char NGT_STARTUP_SEQ[] =
-  { 0x11   /* msg byte 1, meaning ? */
-  , 0x02   /* msg byte 2, meaning ? */
-  , 0x00   /* msg byte 3, meaning ? */
+  { 0x11   /* msg byte 1 */
+  , 0x02   /* msg byte 2 */
+  , 0x00   /* msg byte 3 */
   };
 
 
@@ -79,6 +82,16 @@ enum ReadyDescriptor
 
 int baudRate = B115200;
 
+uint64_t srcIdnrBlock[] = {0x40648C007D3E84E5,0xE3FD7CFA00823340}; //the 8 byte ID of the device in changed direction (pgn 60928)
+unsigned int pgnBlock[2][4] = {{127250,127505,0,0},{0,0,0,0}};  // filtered pgn of the device
+unsigned int srcBlock[] = {-1,-1}; // empty src at the begining
+  
+int srcBlocklen = 2;
+int pgnBlocklen[] = {2,0};
+bool initphase=true;
+long starttime,akttime;
+long initdelay = 3;
+
 static enum ReadyDescriptor isready(int fd1, int fd2);
 static int readIn(unsigned char * msg, size_t len);
 static void parseAndWriteIn(int handle, const unsigned char * cmd);
@@ -100,6 +113,8 @@ int main(int argc, char ** argv)
   struct stat statbuf;
   int pid = 0;
   int speed;
+  
+  time(&starttime);
 
   setProgName(argv[0]);
   while (argc > 1)
@@ -250,6 +265,7 @@ retry:
 
     writeMessage(handle, NGT_MSG_SEND, NGT_STARTUP_SEQ, sizeof(NGT_STARTUP_SEQ));
     sleep(2);
+    parseAndWriteIn(handle, "2018-06-24T07:25:36.128Z,7,59904,4,255,3,00,ee,00"); //to get the src address of the devices
   }
 
   for (;;)
@@ -705,6 +721,18 @@ static void n2kMessageReceived(const unsigned char * msg, size_t msgLen)
     logError("Ignoring N2K message - too long (%u)\n", len);
     return;
   }
+  
+  /* get everytime the right device (find the src from the unique ID) */
+  if (pgn == 60928)
+	  for (int i=0; i < srcBlocklen; i++)
+		if (srcIdnrBlock[i] == (*(uint64_t *) (&msg[11]))) srcBlock[i] = src;
+  
+  /* Is there any filter for the src*/
+  for (int i=0; i < srcBlocklen; i++)
+	if (srcBlock[i] == src)
+		/* Is there any filter for the src pgn */
+		for (int j=0; j < pgnBlocklen[i]; j++)
+			if (pgnBlock[i][j] == pgn) return;      	
 
   p = line;
 
@@ -718,7 +746,15 @@ static void n2kMessageReceived(const unsigned char * msg, size_t msgLen)
     p += strlen(p);
   }
 
-  puts(line);
-  fflush(stdout);
+  if (!initphase)
+  {
+    puts(line);
+    fflush(stdout);
+  }
+  else
+  {
+	time(&akttime);	
+	if (akttime-starttime>=initdelay) initphase=false;  
+  }
 }
 
